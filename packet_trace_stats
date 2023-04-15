@@ -1,0 +1,174 @@
+1. Introduction
+VRouter DPDK and Kernel should provide a way to track flow through various points in the data path including all “entry” and “exit” points.
+Flow should be programmable with Src IP,Dest IP, Src Port, Dest Port and Protocol. Wildcards may be supported in the flow definition.
+
+2. Problem statement
+Packet flow tracking and reporting for a selected Flow/tuple.
+Whenever a packet is dropped anywhere in vrouter and if that match criteria is defined than only packets matching this match criteria is logged.
+In addition when a packet matching this criteria enters vrouter on any interface or passes through vrouter and goes out via any interface 
+(fabric, tap or otherwise) it should be logged with minimal impact to performance.
+
+3. Use Case :
+
+Check drop at Fabric : If packet is dropped at fabric/physical interface entry/exit. Then there should be a way to dump drop information at this interface.
+Check drop at Tap :  Have a mechanism to capture drops at tap interface entry/exit.
+Check drop at Vhost0 : Have a mechanism to capture drops at Vhost0 interface entry/exit.
+Check drop at tunnel : Capture drop at tunnel ( GRE, UDP_MPLS or VxLAN).
+Check drop at VRF    :Capture drops at VRF.
+Check drop at VLAN :Capture drops at VLAN.
+
+Note : Currently we are planning to implement for vif interface.
+
+
+4. Proposed solution :
+
+Request/Input structure :
+
+struct vr_pktcap_stat_key {
+   union {
+      struct vr_inet_flow ip4_key;
+      struct vr_inet6_flow ip6_key;
+      struct vr_drop_interface_info;//Optional if required specific data 
+      } key_u;
+   uint8_t   vr_flow_keylen;
+} __attribute__packed__close__;
+
+
+
+__attribute__packed__open__
+struct vr_inet_flow {
+    unsigned char  ip4_proto;
+    unsigned short ip4_sport;
+    unsigned short ip4_dport;
+    unsigned int   ip4_sip;
+    unsigned int   ip4_dip;
+} __attribute__packed__close__;
+
+
+__attribute__packed__open__
+struct vr_inet6_flow {
+    unsigned char  ip6_proto;
+    unsigned short ip6_sport;
+    unsigned short ip6_dport;
+    unsigned char  ip6_sip[VR_IP6_ADDRESS_LEN];
+    unsigned char  ip6_dip[VR_IP6_ADDRESS_LEN];
+} __attribute__packed__close__;
+
+__attribute__packed__open__
+struct vr_drop_interface_info {
+    unsigned short vif_idx;     unsigned short vif_vrf;
+    unsigned short vif_vlan_id;
+} __attribute__packed__close__;
+
+
+
+Response/Output structure :
+
+#define INTERFACE 5
+
+
+typdef struct vr_pkt_timestamp {
+    time_t ingressPktTime;// Timestamp when pkt is left from interface.
+    time_t egressPktTime; // Timestamp when pkt is reached at interface.
+} vr_pkt_timestamp_t;
+
+typedef struct vr_pkt_metric_drop_log {
+   vr_pkt_drop_log_t drop_stat_info;
+   vr_pkt_timestamp_t pkt_ingress_egress[INTERFACE];
+   unsigned int pps; //PPS = TR / PS. TR transfer rate (bytes/second)    PS packet size (bytes/packet)
+   unsigned char ip_proto;
+   pktCapIntResp pktCapResp;
+
+  //Todo : Below are not supported now.
+    unsigned short vif_type;
+    unsigned char vif_name[VR_INTERFACE_NAME_LEN];
+    unsigned short vlan_id;
+    uint8_t  printLogMaxMin;//Based on some value. Print min or max log.
+    uint8_t       nh_type;  
+} vr_pkt_metric_drop_log_t;
+
+
+struct vr_pkt_drop_metric_st {
+     vr_pkt_metric_drop_log_t **vr_pkt_drop_log;
+     uint64_t *vr_pkt_drop_log_buffer_index;
+};
+
+typedef enum pktcap_Info_res {
+    DUMP_DROP_AT_FABRIC,
+    DUMP_DROP_AT_TAP,
+    DUMP_DROP_AT_VHOST0,
+    DUMP_DROP_AT_TUNNEL,
+    DUMP_DROP_AT_VRF,
+    DUMP_DROP_AT_VLAN,
+} pktCapIntResp; 
+
+struct vrouter {
+   //Other member of vrouter with below
+   struct vr_pkt_drop_metric_st vr_pkt_drop_metric;
+}
+
+5. Functionality triggering point > Vrouter cli.  > Agent telemetric ( Sandesh ).
+
+Currently we are planning to support through vrouter CLI.
+Below is an example. 
+Command formation : 
+      
+     Cmd : src_ip dst_ip src_port dst_port proto. 
+     
+     src_ip : It will be mapped to ip4_sip or ip6_sip based on whether it is ipv4 or ipv6.
+
+     dst_ip : It will be mapped to ip4_dst or ip6_dip based on whether it is ipv6 ip6_dip
+    
+     src_port : It will be mapped to ip4_sport/ip6_sport based on whether it is  ipv4 or ipv6
+
+     dst_port : It will be mapped to ip4_dport/ip6_dport based on ip4/ipv6.
+
+     Proto : It will be mapped to ip4_proto/ip6_proto based on ipv4/ipv6.
+  
+  Response : 
+  Fill the response for each interface, when packet is ingress to the specific  interface and when packet is egressed from the specific interface.
+
+  IngressPktTime : Time when packet has entered to interface.
+  EgressPktTime :Time when packet has exited the interface.
+  Fill the response for every interface.
+  Update vr_pkt_metric_drop_log_t structure. 
+
+Plan for Future : 
+Additionally below optional commands we can support, apart from 5-tuple
+
+Check drop at VRF : Form a common with 5-tuple.
+   Cmd : src_ip dst_ip src_port dst_port proto DUMP_DROP_AT_VRF vrf_id.
+   Other similar to Fabric.
+   Response : 
+   entryPktTime : Time when packet has entered to VRF.
+   exitPktTime : Time when packet has exited the VRF.
+   Fill the response with interface : DUMP_DROP_AT_VRF
+   Update vr_pkt_metric_drop_log_t structure.
+
+Check drop at VLAN : 
+      Cmd : src_ip dst_ip src_port dst_port proto DUMP_DROP_AT_VLAN vlan_id.
+      Other similar to Fabric.
+
+      Response : 
+      Dump packet’s within this VLAN
+   Update vr_pkt_metric_drop_log_t structure.
+   Fill the response with interface : DUMP_DROP_AT_VLAN.
+
+
+4. Implementation :
+
+Enhance vrouter struct with below member
+
+struct vrouter {
+   //Other member of vrouter with below
+   struct vr_pkt_drop_metric_st vr_pkt_drop_metric;
+}
+
+Initialisation of packet trace structure.
+
+> Currently we are implementing this as per dropstats structure/behaviour.
+
+> Allocate memory during stats init for vr_pkt_drop_metric_st as similar to dropstat structure.
+
+
+Let us consider an example with pkt0 vif interface.
